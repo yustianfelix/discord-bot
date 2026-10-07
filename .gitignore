@@ -1,0 +1,30 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Go build artefacts
+bin/
+dist/
+coverage.out
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dependency/vendor directories
+vendor/
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS temp files
+.DS_Store
+Thumbs.db
+
+# Local build output
+/tmp/
+*.log
