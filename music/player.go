@@ -1,24 +1,15 @@
 package music
 
 import (
-	"bufio"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/pion/opus"
-)
-
-const (
-	pcmSampleRate = 48000
-	pcmChannels   = 2
-	pcmFrameSize  = 960
-	pcmFrameBytes = 3840
+	"github.com/jonas747/dca"
 )
 
 // Player manages voice connections and playback of queued audio streams.
@@ -97,25 +88,16 @@ func (p *Player) streamFromCommand(ctx context.Context, vc *discordgo.VoiceConne
 	}
 	defer func() { _ = vc.Speaking(false) }()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", "--no-playlist", "-f", "bestaudio/best", "-o", "-", query)
-	ffmpeg := exec.CommandContext(ctx,
-		"ffmpeg",
-		"-i", "pipe:0",
-		"-f", "s16le",
-		"-ar", "48000",
-		"-ac", "2",
-		"pipe:1",
-	)
+	target := strings.TrimSpace(query)
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") && !strings.HasPrefix(target, "ytsearch") {
+		target = fmt.Sprintf("ytsearch:%s", target)
+	}
+
+	cmd := exec.CommandContext(ctx, "yt-dlp", "--no-playlist", "-f", "bestaudio/best", "-o", "-", target)
 
 	ytPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("create yt-dlp stdout pipe: %w", err)
-	}
-	ffmpeg.Stdin = ytPipe
-
-	ffmpegOut, err := ffmpeg.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("create ffmpeg stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -127,68 +109,25 @@ func (p *Player) streamFromCommand(ctx context.Context, vc *discordgo.VoiceConne
 		}
 	}()
 
-	if err := ffmpeg.Start(); err != nil {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		return fmt.Errorf("start ffmpeg: %w", err)
-	}
-	defer func() {
-		if ffmpeg.Process != nil {
-			_ = ffmpeg.Process.Kill()
-		}
-	}()
+	opts := *dca.StdEncodeOptions
+	opts.RawOutput = true
 
-	encoder, err := opus.NewEncoder(pcmSampleRate, pcmChannels, opus.AppAudio)
+	encodeSession, err := dca.EncodeMem(ytPipe, &opts)
 	if err != nil {
-		return fmt.Errorf("create opus encoder: %w", err)
+		return fmt.Errorf("create dca encode session: %w", err)
 	}
+	defer encodeSession.Cleanup()
 
-	reader := bufio.NewReader(ffmpegOut)
-	pcmBuffer := make([]byte, 0, 4096)
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
+	done := make(chan error, 1)
+	_ = dca.NewStream(encodeSession, vc, done)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			for len(pcmBuffer) < pcmFrameBytes {
-				chunk := make([]byte, 4096)
-				n, err := reader.Read(chunk)
-				if err != nil {
-					if err == io.EOF {
-						return nil
-					}
-					return fmt.Errorf("read ffmpeg pcm stream: %w", err)
-				}
-				if n == 0 {
-					continue
-				}
-				pcmBuffer = append(pcmBuffer, chunk[:n]...)
-			}
-
-			frame := pcmBuffer[:pcmFrameBytes]
-			pcmBuffer = pcmBuffer[pcmFrameBytes:]
-
-			int16Samples := make([]int16, len(frame)/2)
-			for i := 0; i < len(frame); i += 2 {
-				int16Samples[i/2] = int16(binary.LittleEndian.Uint16(frame[i : i+2]))
-			}
-
-			encoded := make([]byte, 4096)
-			n, err := encoder.Encode(int16Samples, encoded)
-			if err != nil {
-				return fmt.Errorf("encode pcm to opus: %w", err)
-			}
-			if n > 0 {
-				select {
-				case vc.OpusSend <- encoded[:n]:
-				case <-time.After(200 * time.Millisecond):
-					return nil
-				}
-			}
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-done:
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("streaming audio: %w", err)
 		}
+		return nil
 	}
 }

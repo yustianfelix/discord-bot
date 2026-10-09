@@ -77,14 +77,35 @@ func (h *SlashCommandHandler) handlePlay(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 
-	if i.Member == nil || i.Member.VoiceState == nil || i.Member.VoiceState.ChannelID == "" {
+	if i.Member == nil || i.Member.User == nil {
+		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: "Could not identify user.",
+		})
+		return
+	}
+
+	guild, err := s.State.Guild(i.GuildID)
+	if err != nil {
+		guild, err = s.Guild(i.GuildID)
+	}
+
+	var channelID string
+	if guild != nil {
+		for _, vs := range guild.VoiceStates {
+			if vs.UserID == i.Member.User.ID {
+				channelID = vs.ChannelID
+				break
+			}
+		}
+	}
+
+	if channelID == "" {
 		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 			Content: "You must be in a voice channel to use /play.",
 		})
 		return
 	}
 
-	channelID := i.Member.VoiceState.ChannelID
 	if err := h.player.Play(context.Background(), i.GuildID, channelID, query); err != nil {
 		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 			Content: fmt.Sprintf("Playback failed: %v", err),
